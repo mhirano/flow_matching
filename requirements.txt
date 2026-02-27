@@ -7,7 +7,8 @@ torchvision
 zarr
 diffusers
 tqdm
-gym
+gymnasium
+# gym
 pygame
 pymunk
 shapely
@@ -31,3 +32,7 @@ mako
 lxml
 terminaltables
 pylint>=2.9
+
+# Video export
+imageio
+imageio-ffmpeg

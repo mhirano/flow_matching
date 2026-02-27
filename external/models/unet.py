@@ -12,8 +12,8 @@ from diffusers.training_utils import EMAModel
 from diffusers.optimization import get_scheduler
 from tqdm.auto import tqdm
 import sys
-import gym
-from gym import spaces
+import gymnasium
+from gymnasium import spaces
 import pygame
 import pymunk
 import pymunk.pygame_util

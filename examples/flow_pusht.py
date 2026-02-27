@@ -32,9 +32,10 @@
 # This notebook is an example of "Affordance-based Robot Manipulation with Flow Matching" https://arxiv.org/abs/2409.01083
 
 import sys
+import os
 
 sys.dont_write_bytecode = True
-sys.path.append('../models')
+sys.path.append('../external/models')
 import numpy as np
 import torch
 import pusht
@@ -44,6 +45,9 @@ from unet import ConditionalUnet1D
 from resnet import get_resnet
 from resnet import replace_bn_with_gn
 import collections
+import cv2
+import imageio
+from termcolor import colored
 from diffusers.training_utils import EMAModel
 from torch.utils.data import Dataset, DataLoader
 from diffusers.optimization import get_scheduler
@@ -56,7 +60,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 ##################################
 ########## download the pusht data and put in the folder
-dataset_path = "pusht_cchi_v7_replay.zarr.zip"
+dataset_path = "../res/pusht_cchi_v7_replay.zarr.zip"
 
 obs_horizon = 1
 pred_horizon = 16
@@ -114,7 +118,8 @@ lr_scheduler = get_scheduler(
 )
 
 FM = ConditionalFlowMatcher(sigma=sigma)
-
+avg_loss_train_list = []
+avg_loss_val_list = []
 
 ########################################################################
 #### Train the model
@@ -165,7 +170,8 @@ def train():
 ########################################################################
 ###### test the model
 def test():
-    PATH = './flow_ema_03000.pth'
+    # PATH = './flow_ema_03000.pth'
+    PATH = '../res/flow_pusht.pth'
     state_dict = torch.load(PATH, map_location='cuda')
     ema_nets = nets
     ema_nets.vision_encoder.load_state_dict(state_dict['vision_encoder'])
@@ -258,6 +264,15 @@ def test():
                             done = True
                         if done:
                             break
+
+            # Save rendered frames as video
+            out_dir = './test_results'
+            os.makedirs(out_dir, exist_ok=True)
+            video_path = os.path.join(out_dir, f'seed_{seed}_trial_{pp}.mp4')
+            with imageio.get_writer(video_path, fps=30, codec='libx264', pixelformat='yuv420p') as writer:
+                for img in imgs:
+                    writer.append_data(img)
+            print(colored(f"seed: {seed}, trial: {pp}, max_reward: {max(rewards):.2f}, saved to {video_path}", 'green'))
 
 
 if __name__ == '__main__':

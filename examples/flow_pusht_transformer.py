@@ -35,7 +35,8 @@ import sys
 import time
 
 sys.dont_write_bytecode = True
-sys.path.append('../models')
+sys.path.append('../external/models')
+sys.path.append('../external')
 import os
 import matplotlib.pyplot as plt
 import numpy as np
@@ -62,7 +63,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 dtype = torch.cuda.FloatTensor if torch.cuda.is_available() else torch.FloatTensor
 
 ##################################
-dataset_path = "pusht_cchi_v7_replay.zarr.zip"
+dataset_path = "../res/pusht_cchi_v7_replay.zarr.zip"
 
 obs_horizon = 1
 pred_horizon = 16
@@ -164,6 +165,7 @@ for epoch in range(0, num_epochs):
     print(colored(f"epoch: {epoch:>02},  loss_train: {avg_loss_train:.10f}", 'yellow'))
 
     if epoch % 1000 == 0:
+        ema.store(nets.parameters())
         ema.copy_to(nets.parameters())
         PATH = './flow_ema_%05d.pth' % epoch
         torch.save({'vision_encoder': nets.vision_encoder.state_dict(),
@@ -179,7 +181,7 @@ sys.exit(0)
 
 ########################################################################
 ###### test the model
-PATH = './flow_ema_trans_03000.pth'
+PATH = '../res/flow_ema_trans_03000.pth'
 state_dict = torch.load(PATH, map_location='cuda')
 ema_nets = nets
 ema_nets.vision_encoder.load_state_dict(state_dict['vision_encoder'])
