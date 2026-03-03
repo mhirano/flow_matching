@@ -1,3 +1,4 @@
 venv_*
 res/*
 examples/test_results/*
+examples/flow_pusht_checkpoints/*

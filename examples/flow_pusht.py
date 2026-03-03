@@ -158,9 +158,11 @@ def train():
         avg_loss_train_list.append(avg_loss_train.detach().cpu().numpy())
         print(colored(f"epoch: {epoch:>02},  loss_train: {avg_loss_train:.10f}", 'yellow'))
 
-        if epoch == 3000:
+        if epoch % 10 == 0:
+            os.makedirs('./flow_pusht_checkpoints', exist_ok=True)
+            ema.store(nets.parameters())
             ema.copy_to(nets.parameters())
-            PATH = './checkpoint_t/flow_ema_%05d.pth' % epoch
+            PATH = './flow_pusht_checkpoints/flow_ema_%05d.pth' % epoch
             torch.save({'vision_encoder': nets.vision_encoder.state_dict(),
                         'noise_pred_net': nets.noise_pred_net.state_dict(),
                         }, PATH)
