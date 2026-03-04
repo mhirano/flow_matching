@@ -33,13 +33,18 @@
 
 import sys
 import os
+import argparse
 
 sys.dont_write_bytecode = True
-sys.path.append('../external/models')
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_script_dir, '..', 'external', 'models'))
 import numpy as np
 import torch
 import pusht
 import torch.nn as nn
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 from unet import ConditionalUnet1D
 from resnet import get_resnet
@@ -55,18 +60,41 @@ from torchcfm.conditional_flow_matching import *
 from torchcfm.utils import *
 from torchcfm.models.models import *
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-# dtype = torch.cuda.FloatTensor if torch.cuda.is_available() else torch.FloatTensor
-
 ##################################
+_parser = argparse.ArgumentParser(description='Flow Matching for PushT task')
+_parser.add_argument('mode', choices=['train', 'test', 'unittest'], help="Mode to run")
+_parser.add_argument('--data_root', type=str, default=None,
+                     help='Directory containing the dataset file')
+_parser.add_argument('--output_dir', type=str, default=None,
+                     help='Directory to save checkpoints')
+_parser.add_argument('--model_path', type=str, default=None,
+                     help='Path to model checkpoint for test mode')
+_args = _parser.parse_args()
+
+# DDP initialization (train only)
+if _args.mode == 'train':
+    dist.init_process_group(backend='nccl')
+    local_rank = int(os.environ['LOCAL_RANK'])
+    device = torch.device(f'cuda:{local_rank}')
+    torch.cuda.set_device(local_rank)
+else:
+    local_rank = 0
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 ########## download the pusht data and put in the folder
-dataset_path = "../res/pusht_cchi_v7_replay.zarr.zip"
+if _args.data_root is not None:
+    dataset_path = os.path.join(_args.data_root, 'pusht_cchi_v7_replay.zarr.zip')
+else:
+    dataset_path = os.path.join(_script_dir, '..', 'res', 'pusht_cchi_v7_replay.zarr.zip')
+
+output_dir = _args.output_dir if _args.output_dir else os.path.join(_script_dir, '..', 'outputs')
 
 obs_horizon = 1
 pred_horizon = 16
 action_dim = 2
 action_horizon = 8
-num_epochs = 3001
+num_epochs = 101
+# num_epochs = 3001
 vision_feature_dim = 514
 
 # create dataset from file
@@ -80,14 +108,16 @@ dataset = pusht.PushTImageDataset(
 stats = dataset.stats
 
 # create dataloader
+_sampler = DistributedSampler(dataset, shuffle=True) if _args.mode == 'train' else None
 dataloader = DataLoader(
     dataset,
     batch_size=64,
     num_workers=4,
-    shuffle=True,
+    sampler=_sampler,
+    shuffle=(_sampler is None),
     # accelerate cpu-gpu transfer
     pin_memory=True,
-    # don't kill worker process afte each epoch
+    # don't kill worker process after each epoch
     persistent_workers=True
 )
 
@@ -104,12 +134,19 @@ nets = nn.ModuleDict({
     'noise_pred_net': noise_pred_net
 }).to(device)
 
+if _args.mode == 'train':
+    if local_rank == 0:
+        print(f"Using DDP with {dist.get_world_size()} GPUs")
+    nets['vision_encoder'] = DDP(nets['vision_encoder'], device_ids=[local_rank])
+    nets['noise_pred_net'] = DDP(nets['noise_pred_net'], device_ids=[local_rank])
+
 ##################################################################
 sigma = 0.0
 ema = EMAModel(
     parameters=nets.parameters(),
     power=0.75)
-optimizer = torch.optim.AdamW(params=nets.parameters(), lr=1e-4, weight_decay=1e-6)
+_world_size = dist.get_world_size() if dist.is_initialized() else 1
+optimizer = torch.optim.AdamW(params=nets.parameters(), lr=1e-4 * _world_size, weight_decay=1e-6)
 lr_scheduler = get_scheduler(
     name='cosine',
     optimizer=optimizer,
@@ -125,8 +162,9 @@ avg_loss_val_list = []
 #### Train the model
 def train():
     for epoch in range(num_epochs):
+        _sampler.set_epoch(epoch)
         total_loss_train = 0.0
-        for data in tqdm(dataloader):
+        for data in tqdm(dataloader, disable=(local_rank != 0)):
             x_img = data['image'][:, :obs_horizon].to(device)
             x_pos = data['agent_pos'][:, :obs_horizon].to(device)
             x_traj = data['action'].to(device)
@@ -154,27 +192,36 @@ def train():
             # update Exponential Moving Average of the model weights
             ema.step(nets.parameters())
 
-        avg_loss_train = total_loss_train / len(dataloader)
-        avg_loss_train_list.append(avg_loss_train.detach().cpu().numpy())
-        print(colored(f"epoch: {epoch:>02},  loss_train: {avg_loss_train:.10f}", 'yellow'))
+        if local_rank == 0:
+            avg_loss_train = total_loss_train / len(dataloader)
+            avg_loss_train_list.append(avg_loss_train.detach().cpu().numpy())
+            print(colored(f"epoch: {epoch:>02},  loss_train: {avg_loss_train:.10f}", 'yellow'))
 
-        if epoch % 10 == 0:
-            os.makedirs('./flow_pusht_checkpoints', exist_ok=True)
-            ema.store(nets.parameters())
-            ema.copy_to(nets.parameters())
-            PATH = './flow_pusht_checkpoints/flow_ema_%05d.pth' % epoch
-            torch.save({'vision_encoder': nets.vision_encoder.state_dict(),
-                        'noise_pred_net': nets.noise_pred_net.state_dict(),
-                        }, PATH)
-            ema.restore(nets.parameters())
+            if epoch % 10 == 0:
+                os.makedirs(output_dir, exist_ok=True)
+                ema.store(nets.parameters())
+                ema.copy_to(nets.parameters())
+                PATH = os.path.join(output_dir, 'flow_ema_%05d.pth' % epoch)
+                ve = nets.vision_encoder
+                npn = nets.noise_pred_net
+                torch.save({
+                    'vision_encoder': (ve.module if isinstance(ve, DDP) else ve).state_dict(),
+                    'noise_pred_net': (npn.module if isinstance(npn, DDP) else npn).state_dict(),
+                }, PATH)
+                ema.restore(nets.parameters())
+                np.save(os.path.join(output_dir, 'loss_history.npy'),
+                        np.array(avg_loss_train_list))
 
 
 ########################################################################
 ###### test the model
 def test():
     # PATH = './flow_ema_03000.pth'
-    PATH = '../res/flow_pusht.pth'
-    state_dict = torch.load(PATH, map_location='cuda')
+    if _args.model_path is not None:
+        PATH = _args.model_path
+    else:
+        PATH = os.path.join(_script_dir, '..', 'res', 'flow_pusht.pth')
+    state_dict = torch.load(PATH, map_location=device)
     ema_nets = nets
     ema_nets.vision_encoder.load_state_dict(state_dict['vision_encoder'])
     ema_nets.noise_pred_net.load_state_dict(state_dict['noise_pred_net'])
@@ -241,11 +288,6 @@ def test():
                     end = start + action_horizon
                     action = action_pred[start:end, :]
 
-                    # x_img = x_img[0, :].permute((1, 2, 0))
-                    # plot_trajectory(x0[0].detach().cpu().numpy(), vt[0].detach().cpu().numpy(),
-                    #                 action_pred,
-                    #                 x_img.detach().cpu().numpy())
-
                     # execute action_horizon number of steps
                     for j in range(len(action)):
                         # stepping env
@@ -268,7 +310,7 @@ def test():
                             break
 
             # Save rendered frames as video
-            out_dir = './test_results'
+            out_dir = os.path.join(output_dir, 'test_results')
             os.makedirs(out_dir, exist_ok=True)
             video_path = os.path.join(out_dir, f'seed_{seed}_trial_{pp}.mp4')
             with imageio.get_writer(video_path, fps=30, codec='libx264', pixelformat='yuv420p') as writer:
@@ -278,18 +320,10 @@ def test():
 
 
 if __name__ == '__main__':
-    # Check if an argument was provided
-    if len(sys.argv) < 2:
-        print("No argument provided. Please specify 'train', 'test', or 'print'.")
-        sys.exit(1)
-
-    arg = sys.argv[1].lower()
-
-    if arg == 'train':
+    if _args.mode == 'train':
         train()
-    elif arg == 'test':
+        dist.destroy_process_group()
+    elif _args.mode == 'test':
         test()
-    elif arg == 'unittest':
+    elif _args.mode == 'unittest':
         print("Uni Test Successful")
-    else:
-        print(f"Unknown argument '{arg}'. Please specify 'train', 'test', or 'print'.")
