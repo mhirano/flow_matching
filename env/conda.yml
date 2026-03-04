@@ -1,0 +1,48 @@
+name: flow_matching_env
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  # PyTorch with CUDA 11.8 (compatible with NC96ads-A100-v4)
+  - pytorch::pytorch=2.1.2
+  - pytorch::torchvision=0.16.2
+  - pytorch::torchaudio=2.1.2
+  - pytorch::pytorch-cuda=11.8
+  - pip:
+    # Flow matching
+    - torchcfm
+    - torchdyn
+    - torchdiffeq
+    - torchsde
+    # Diffusion policy / EMA / scheduler
+    # diffusers 0.30+ は torch.xpu (PyTorch 2.4+) を要求するため固定
+    - diffusers>=0.25,<0.30
+    - pytorch-lightning>=1.7.0,<2.0.0
+    # Dataset
+    - zarr
+    - gdown
+    # PushT environment
+    - gymnasium
+    - pygame
+    - pymunk
+    - shapely
+    # Image processing
+    - opencv-python
+    - scikit-image
+    - scikit-learn
+    - scikit-video
+    # Utilities
+    # numpy 2.x は PyTorch 2.1.2 と非互換のため 1.x に固定
+    - "numpy>=1.24,<2"
+    - tqdm
+    - matplotlib
+    - ipython
+    - termcolor
+    - wheel
+    # Video export
+    - imageio
+    - imageio-ffmpeg
